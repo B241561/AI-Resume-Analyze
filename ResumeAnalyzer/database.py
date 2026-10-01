@@ -9,24 +9,45 @@ from typing import Any
 from config import DATABASE_PATH
 
 
+_CREATE_ANALYSES_TABLE = """
+    CREATE TABLE analyses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT NOT NULL,
+        resume_text TEXT,
+        job_description TEXT,
+        analysis_json TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+
 def initialize_database() -> None:
     with closing(sqlite3.connect(DATABASE_PATH)) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS analyses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_name TEXT NOT NULL,
-                resume_text TEXT,
-                job_description TEXT,
-                analysis_json TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        # Privacy-by-default migration: older versions stored source documents in plaintext.
-        # History only needs metadata + analysis JSON, so erase legacy raw text on startup.
-        connection.execute("UPDATE analyses SET resume_text = NULL, job_description = NULL")
-        connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {
+                row[1]: row
+                for row in connection.execute("PRAGMA table_info(analyses)")
+            }
+            if not columns:
+                connection.execute(_CREATE_ANALYSES_TABLE)
+            elif any(columns[name][3] for name in ("resume_text", "job_description") if name in columns):
+                connection.execute("ALTER TABLE analyses RENAME TO analyses_legacy")
+                connection.execute(_CREATE_ANALYSES_TABLE)
+                connection.execute(
+                    """
+                    INSERT INTO analyses (id, file_name, analysis_json, created_at)
+                    SELECT id, file_name, analysis_json, created_at FROM analyses_legacy
+                    """
+                )
+                connection.execute("DROP TABLE analyses_legacy")
+
+            # History retains analysis metadata, never the source documents.
+            connection.execute("UPDATE analyses SET resume_text = NULL, job_description = NULL")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def save_analysis(
