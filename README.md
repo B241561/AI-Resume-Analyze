@@ -232,8 +232,7 @@ TESSERACT_CMD=
 Never commit an actual API key. 
  
 ## Current Limitations 
- 
-- Local job matching is still text-based; Gemini provides contextual matching only when enabled. 
+
 - OCR depends on a locally installed Tesseract executable and works best on clear scans. 
 - ATS Readiness is an application-specific rubric, not a verified employer ATS score. 
 - No automated test suite is included yet. 
