@@ -9,14 +9,9 @@
 ## 📸 Application Preview
 
 <!-- Add your application screenshots to `docs/images/` -->
+<img width="1917" height="1030" alt="image" src="https://github.com/user-attachments/assets/4c1d9980-6d8e-4766-9502-00340b1304f0" />
 
-| Dashboard                                                  | Resume Analysis                              |
-| ---------------------------------------------------------- | -------------------------------------------- |
-| ![AI Resume Analyzer Dashboard](docs/images/dashboard.png) | ![Resume Analysis](docs/images/analysis.png) |
 
-| Job Description Matching                      | Analysis History                             |
-| --------------------------------------------- | -------------------------------------------- |
-| ![Job Matching](docs/images/job-matching.png) | ![Analysis History](docs/images/history.png) |
 
 > **Tip:** Replace the image paths above with your actual screenshots. Keeping screenshots inside `docs/images/` makes the README portable across GitHub and local clones.
 
