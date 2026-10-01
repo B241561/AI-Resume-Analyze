@@ -4,31 +4,35 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Virtual environment
+# Virtual environments
 .venv/
 venv/
 env/
 
-# Environment / secrets
+# Secrets
 .env
+
+# IDE / agent metadata
+.idea/
+.vscode/
+.agents/
 
 # Build artifacts
 build/
 dist/
 *.spec.bak
 
-# Local application data
+# Runtime / local data
+*.log
 resume_analyzer.db
-app.log
-
-# Generated reports / temporary files
-reports/
-temp/
-
-# IDE
-.idea/
-.vscode/
+ResumeAnalyzer/reports/*
+!ResumeAnalyzer/reports/.gitkeep
+ResumeAnalyzer/temp/*
+!ResumeAnalyzer/temp/.gitkeep
 
 # OS
-Thumbs.db
 .DS_Store
+Thumbs.db
+
+# Duplicate/generated documentation
+AI_Resume_Analyzer_README.md

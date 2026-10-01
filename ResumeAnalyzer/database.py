@@ -16,24 +16,34 @@ def initialize_database() -> None:
             CREATE TABLE IF NOT EXISTS analyses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_name TEXT NOT NULL,
-                resume_text TEXT NOT NULL,
+                resume_text TEXT,
                 job_description TEXT,
                 analysis_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        # Privacy-by-default migration: older versions stored source documents in plaintext.
+        # History only needs metadata + analysis JSON, so erase legacy raw text on startup.
+        connection.execute("UPDATE analyses SET resume_text = NULL, job_description = NULL")
         connection.commit()
 
 
-def save_analysis(file_path: str | Path, resume_text: str, job_description: str, analysis: dict[str, Any]) -> int:
+def save_analysis(
+    file_path: str | Path,
+    resume_text: str,
+    job_description: str,
+    analysis: dict[str, Any],
+) -> int:
+    """Save analysis metadata/results without storing the original resume or job description."""
+    del resume_text, job_description
     with closing(sqlite3.connect(DATABASE_PATH)) as connection:
         cursor = connection.execute(
             """
             INSERT INTO analyses (file_name, resume_text, job_description, analysis_json)
-            VALUES (?, ?, ?, ?)
+            VALUES (?, NULL, NULL, ?)
             """,
-            (Path(file_path).name, resume_text, job_description, json.dumps(analysis)),
+            (Path(file_path).name, json.dumps(analysis)),
         )
         connection.commit()
         return int(cursor.lastrowid)

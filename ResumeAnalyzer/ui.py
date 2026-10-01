@@ -3,13 +3,13 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import BooleanVar, filedialog, messagebox
 from typing import Any
 
 import customtkinter as ctk
 
 from analyzer import analyze_resume
-from config import ASSETS_DIR
+from config import ASSETS_DIR, GEMINI_API_KEY
 from database import list_recent_analyses, save_analysis
 from pdf_reader import PdfReadError, extract_text_from_file
 from report_generator import export_analysis_pdf
@@ -22,8 +22,8 @@ class ResumeAnalyzerApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("AI Resume Analyzer")
-        self.geometry("1180x760")
-        self.minsize(980, 640)
+        self.geometry("1180x790")
+        self.minsize(980, 680)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -31,6 +31,7 @@ class ResumeAnalyzerApp(ctk.CTk):
         self.selected_file: Path | None = None
         self.current_analysis: dict[str, Any] | None = None
         self.current_file_name = ""
+        self.use_gemini_var = BooleanVar(value=False)
 
         self._set_icon()
         self._build_layout()
@@ -55,7 +56,7 @@ class ResumeAnalyzerApp(ctk.CTk):
         title = ctk.CTkLabel(sidebar, text="AI Resume Analyzer", font=ctk.CTkFont(size=24, weight="bold"))
         title.grid(row=0, column=0, padx=22, pady=(24, 8), sticky="w")
 
-        subtitle = ctk.CTkLabel(sidebar, text="Supports PDF and DOCX resumes", text_color="#94A3B8")
+        subtitle = ctk.CTkLabel(sidebar, text="PDF/DOCX + scanned PDF OCR", text_color="#94A3B8")
         subtitle.grid(row=1, column=0, padx=22, pady=(0, 18), sticky="w")
 
         self.file_label = ctk.CTkLabel(sidebar, text="No PDF or DOCX selected", anchor="w", wraplength=270)
@@ -87,10 +88,33 @@ class ResumeAnalyzerApp(ctk.CTk):
         jd_label.grid(row=0, column=0, padx=18, pady=(16, 8), sticky="w")
 
         self.job_textbox = ctk.CTkTextbox(input_card, height=110)
-        self.job_textbox.grid(row=1, column=0, padx=18, pady=(0, 16), sticky="ew")
+        self.job_textbox.grid(row=1, column=0, padx=18, pady=(0, 10), sticky="ew")
+
+        privacy_text = (
+            "Gemini is optional and OFF by default. When enabled, extracted resume/JD text is sent to the configured Google Gemini API. "
+            "When disabled, analysis stays local."
+        )
+        ctk.CTkLabel(
+            input_card,
+            text=privacy_text,
+            text_color="#94A3B8",
+            wraplength=760,
+            justify="left",
+        ).grid(row=2, column=0, padx=18, pady=(0, 8), sticky="w")
+
+        self.gemini_checkbox = ctk.CTkCheckBox(
+            input_card,
+            text="Use Gemini AI for contextual feedback and job matching",
+            variable=self.use_gemini_var,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.gemini_checkbox.grid(row=3, column=0, padx=18, pady=(0, 12), sticky="w")
+        if not GEMINI_API_KEY:
+            self.gemini_checkbox.configure(state="disabled")
 
         action_row = ctk.CTkFrame(input_card, fg_color="transparent")
-        action_row.grid(row=2, column=0, padx=18, pady=(0, 16), sticky="ew")
+        action_row.grid(row=4, column=0, padx=18, pady=(0, 16), sticky="ew")
         action_row.grid_columnconfigure(2, weight=1)
 
         self.analyze_button = ctk.CTkButton(action_row, text="Analyze Resume", command=self._start_analysis)
@@ -108,7 +132,7 @@ class ResumeAnalyzerApp(ctk.CTk):
         scores.grid(row=1, column=0, pady=16, sticky="ew")
         scores.grid_columnconfigure((0, 1), weight=1)
 
-        self.ats_card = ScoreCard(scores, "ATS Score")
+        self.ats_card = ScoreCard(scores, "ATS Readiness")
         self.ats_card.grid(row=0, column=0, padx=(0, 8), sticky="ew")
         self.match_card = ScoreCard(scores, "Job Match")
         self.match_card.grid(row=0, column=1, padx=(8, 0), sticky="ew")
@@ -139,14 +163,19 @@ class ResumeAnalyzerApp(ctk.CTk):
 
         resume_path = self.selected_file
         job_description = self.job_textbox.get("1.0", "end").strip()
+        use_gemini = bool(self.use_gemini_var.get()) and bool(GEMINI_API_KEY)
         self._set_busy(True)
-        thread = threading.Thread(target=self._run_analysis, args=(resume_path, job_description), daemon=True)
+        thread = threading.Thread(
+            target=self._run_analysis,
+            args=(resume_path, job_description, use_gemini),
+            daemon=True,
+        )
         thread.start()
 
-    def _run_analysis(self, resume_path: Path, job_description: str) -> None:
+    def _run_analysis(self, resume_path: Path, job_description: str, use_gemini: bool) -> None:
         try:
             resume_text = extract_text_from_file(resume_path)
-            analysis = analyze_resume(resume_text, job_description)
+            analysis = analyze_resume(resume_text, job_description, use_gemini=use_gemini)
             analysis_id = save_analysis(resume_path, resume_text, job_description, analysis)
             analysis["id"] = analysis_id
             self.after(0, lambda: self._analysis_completed(resume_path.name, analysis))
@@ -173,10 +202,13 @@ class ResumeAnalyzerApp(ctk.CTk):
         if busy:
             self.analyze_button.configure(state="disabled")
             self.export_button.configure(state="disabled")
+            self.gemini_checkbox.configure(state="disabled")
             self.progress.grid()
             self.progress.start()
         else:
             self.analyze_button.configure(state="normal")
+            if GEMINI_API_KEY:
+                self.gemini_checkbox.configure(state="normal")
             self.progress.stop()
             self.progress.grid_remove()
             if self.current_analysis:
@@ -191,6 +223,16 @@ class ResumeAnalyzerApp(ctk.CTk):
             row=0, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
         )
 
+        breakdown = analysis.get("ats_breakdown", {})
+        BreakdownCard(self.results_frame, "ATS Readiness Breakdown", breakdown).grid(
+            row=1, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+        )
+
+        if analysis.get("match_explanation"):
+            SummaryCard(self.results_frame, "Job Match Method", analysis["match_explanation"]).grid(
+                row=2, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+            )
+
         cards = [
             ("Technical Skills", analysis.get("technical_skills", [])),
             ("Soft Skills", analysis.get("soft_skills", [])),
@@ -203,16 +245,17 @@ class ResumeAnalyzerApp(ctk.CTk):
             ("Missing Job Skills", analysis.get("missing_job_skills", [])),
         ]
 
-        for index, (title, items) in enumerate(cards, start=1):
-            row = (index + 1) // 2
-            column = (index + 1) % 2
+        start_row = 3 if analysis.get("match_explanation") else 2
+        for position, (title, items) in enumerate(cards):
+            row = start_row + position // 2
+            column = position % 2
             ListCard(self.results_frame, title, items).grid(row=row, column=column, padx=6, pady=6, sticky="nsew")
 
     def _show_empty_state(self) -> None:
         self._clear_results()
         label = ctk.CTkLabel(
             self.results_frame,
-            text="Choose a resume PDF or DOCX and click Analyze Resume.",
+            text="Choose a resume PDF/DOCX and click Analyze Resume.",
             font=ctk.CTkFont(size=18, weight="bold"),
             text_color="#CBD5E1",
         )
@@ -247,8 +290,8 @@ class ResumeAnalyzerApp(ctk.CTk):
     def _show_about_dialog(self) -> None:
         dialog = ctk.CTkToplevel(self)
         dialog.title("About AI Resume Analyzer")
-        dialog.geometry("560x620")
-        dialog.minsize(520, 560)
+        dialog.geometry("600x700")
+        dialog.minsize(540, 620)
         dialog.transient(self)
         dialog.grab_set()
 
@@ -267,7 +310,7 @@ class ResumeAnalyzerApp(ctk.CTk):
 
         details = (
             "Project Name: AI Resume Analyzer\n"
-            "Version: 1.0\n"
+            "Version: 2.0\n"
             "Developer: Chander Kant\n"
             "Course: B.Tech Data Science\n"
             "Year: 3rd Year"
@@ -277,17 +320,29 @@ class ResumeAnalyzerApp(ctk.CTk):
         )
 
         description = (
-            "AI Resume Analyzer is a desktop application that analyzes PDF and DOCX resumes using "
-            "Google's Gemini AI, estimates ATS compatibility, extracts skills, compares resumes "
-            "with job descriptions, and generates detailed PDF reports."
+            "AI Resume Analyzer is a desktop application that extracts resume text, uses a deterministic local ATS-readiness rubric, "
+            "supports scanned PDF OCR, performs weighted/semantic job matching, and can optionally use Google Gemini for contextual feedback."
         )
         ctk.CTkLabel(
             container,
             text="Project Description",
             font=ctk.CTkFont(size=16, weight="bold"),
         ).grid(row=2, column=0, padx=12, pady=(12, 4), sticky="w")
-        ctk.CTkLabel(container, text=description, wraplength=480, justify="left").grid(
+        ctk.CTkLabel(container, text=description, wraplength=520, justify="left").grid(
             row=3, column=0, padx=12, pady=(0, 12), sticky="ew"
+        )
+
+        privacy = (
+            "Privacy: raw resume text and job descriptions are not stored in the local SQLite history. "
+            "When Gemini is enabled, the extracted text is sent to the configured Gemini API; when disabled, analysis remains local."
+        )
+        ctk.CTkLabel(
+            container,
+            text="Privacy",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=4, column=0, padx=12, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(container, text=privacy, wraplength=520, justify="left").grid(
+            row=5, column=0, padx=12, pady=(0, 12), sticky="ew"
         )
 
         references = "\n".join(
@@ -299,28 +354,17 @@ class ResumeAnalyzerApp(ctk.CTk):
                 "- python-docx\n  https://python-docx.readthedocs.io/",
                 "- SQLite\n  https://sqlite.org/",
                 "- ReportLab\n  https://www.reportlab.com/",
+                "- Tesseract OCR\n  https://github.com/tesseract-ocr/tesseract",
+                "- scikit-learn\n  https://scikit-learn.org/",
             ]
         )
         ctk.CTkLabel(
             container,
             text="References",
             font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=4, column=0, padx=12, pady=(12, 4), sticky="w")
-        ctk.CTkLabel(container, text=references, justify="left").grid(
-            row=5, column=0, padx=12, pady=(0, 12), sticky="w"
-        )
-
-        acknowledgements = (
-            "This application uses open-source software including Python, CustomTkinter, "
-            "PyMuPDF, python-docx, ReportLab, SQLite, and Google Gemini API."
-        )
-        ctk.CTkLabel(
-            container,
-            text="Acknowledgements",
-            font=ctk.CTkFont(size=16, weight="bold"),
         ).grid(row=6, column=0, padx=12, pady=(12, 4), sticky="w")
-        ctk.CTkLabel(container, text=acknowledgements, wraplength=480, justify="left").grid(
-            row=7, column=0, padx=12, pady=(0, 18), sticky="ew"
+        ctk.CTkLabel(container, text=references, justify="left").grid(
+            row=7, column=0, padx=12, pady=(0, 12), sticky="w"
         )
 
         ctk.CTkButton(container, text="Close", command=dialog.destroy).grid(
@@ -358,6 +402,31 @@ class SummaryCard(ctk.CTkFrame):
             row=1, column=0, padx=16, pady=(0, 14), sticky="ew"
         )
         self.grid_columnconfigure(0, weight=1)
+
+
+class BreakdownCard(ctk.CTkFrame):
+    def __init__(self, parent: ctk.CTkBaseClass, title: str, breakdown: dict[str, Any]) -> None:
+        super().__init__(parent)
+        self.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(14, 8), sticky="w"
+        )
+        labels = {
+            "contact_and_links": "Contact & links",
+            "resume_sections": "Resume sections",
+            "technical_skills": "Technical skills",
+            "measurable_impact": "Measurable impact",
+            "action_language": "Action language",
+            "parseability": "Parseability",
+            "job_relevance": "Job relevance",
+        }
+        text = " | ".join(
+            f"{labels.get(key, key.replace('_', ' ').title())}: {value}"
+            for key, value in breakdown.items()
+        ) or "No breakdown available."
+        ctk.CTkLabel(self, text=text, wraplength=760, justify="left", text_color="#CBD5E1").grid(
+            row=1, column=0, padx=14, pady=(0, 14), sticky="w"
+        )
 
 
 class ListCard(ctk.CTkFrame):

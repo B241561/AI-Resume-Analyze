@@ -25,6 +25,8 @@ load_dotenv(ENV_PATH)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "5"))
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 
 
 def ensure_app_directories() -> None:

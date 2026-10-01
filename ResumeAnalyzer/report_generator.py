@@ -35,10 +35,37 @@ def export_analysis_pdf(file_name: str, analysis: dict[str, Any]) -> Path:
         Paragraph(f"Date: {generated_at.strftime('%d %B %Y, %I:%M %p')}", styles["Normal"]),
         Spacer(1, 12),
         _score_table(analysis),
+        Spacer(1, 8),
+        Paragraph("Scoring Method", styles["Heading2"]),
+        Paragraph(
+            "ATS Readiness is a transparent application-specific rubric based on contact/link completeness, resume sections, "
+            "technical skills, measurable impact, action language, parseability, and—when a job description is supplied—job relevance. "
+            "It is not an employer ATS score.",
+            styles["BodyText"],
+        ),
         Spacer(1, 12),
         Paragraph("Candidate Summary", styles["Heading2"]),
         Paragraph(_safe_text(analysis.get("summary", "")), styles["BodyText"]),
     ]
+
+    breakdown = analysis.get("ats_breakdown", {})
+    if breakdown:
+        story.extend(
+            [
+                Spacer(1, 10),
+                Paragraph("ATS Readiness Breakdown", styles["Heading2"]),
+                _breakdown_table(breakdown),
+            ]
+        )
+
+    if analysis.get("match_explanation"):
+        story.extend(
+            [
+                Spacer(1, 10),
+                Paragraph("Job Match Method", styles["Heading2"]),
+                Paragraph(_safe_text(analysis.get("match_explanation", "")), styles["BodyText"]),
+            ]
+        )
 
     for title, key in [
         ("Technical Skills", "technical_skills"),
@@ -62,7 +89,7 @@ def _score_table(analysis: dict[str, Any]) -> Table:
     table = Table(
         [
             ["Metric", "Score"],
-            ["ATS Score", f"{analysis.get('ats_score', 0)} / 100"],
+            ["ATS Readiness", f"{analysis.get('ats_score', 0)} / 100"],
             ["Job Match", f"{analysis.get('match_percentage', 0)}%"],
         ],
         colWidths=[3 * inch, 2.5 * inch],
@@ -74,6 +101,31 @@ def _score_table(analysis: dict[str, Any]) -> Table:
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
                 ("PADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    return table
+
+
+def _breakdown_table(breakdown: dict[str, Any]) -> Table:
+    rows = [["Component", "Points"]]
+    labels = {
+        "contact_and_links": "Contact & links",
+        "resume_sections": "Resume sections",
+        "technical_skills": "Technical skills",
+        "measurable_impact": "Measurable impact",
+        "action_language": "Action language",
+        "parseability": "Parseability",
+        "job_relevance": "Job relevance",
+    }
+    rows.extend([[labels.get(key, key), str(value)] for key, value in breakdown.items()])
+    table = Table(rows, colWidths=[3 * inch, 2.5 * inch])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("PADDING", (0, 0), (-1, -1), 6),
             ]
         )
     )

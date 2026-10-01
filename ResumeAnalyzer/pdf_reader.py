@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 
 import fitz
 from docx import Document
 
-from config import MAX_PDF_MB
+from config import MAX_PDF_MB, OCR_ENABLED, TESSERACT_CMD
 
 
 class PdfReadError(Exception):
@@ -55,9 +57,58 @@ def extract_text_from_pdf(pdf_path: str | Path) -> str:
         document.close()
 
     text = "\n".join(pages).strip()
-    if len(text) < 50:
-        raise PdfReadError("Could not extract enough text. Use a text-based resume PDF.")
-    return text
+    if len(text) >= 50:
+        return text
+
+    if not OCR_ENABLED:
+        raise PdfReadError(
+            "Could not extract enough text. OCR is disabled. Enable OCR_ENABLED=true or use a text-based PDF."
+        )
+
+    ocr_text = _extract_text_with_ocr(path)
+    if len(ocr_text) < 50:
+        raise PdfReadError(
+            "Could not extract enough text from this PDF, even with OCR. Make sure the scan is clear."
+        )
+    return ocr_text
+
+
+def _extract_text_with_ocr(pdf_path: Path) -> str:
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError as exc:
+        raise PdfReadError(
+            "This PDF appears to be scanned. OCR support is missing. Install pytesseract and Pillow."
+        ) from exc
+
+    tesseract_executable = _find_tesseract_executable()
+    if tesseract_executable:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_executable
+
+    pages: list[str] = []
+    try:
+        document = fitz.open(pdf_path)
+    except Exception as exc:
+        raise PdfReadError("Could not open the PDF for OCR.") from exc
+
+    try:
+        for page in document:
+            # 200 DPI is a reasonable quality/performance balance for resume scans.
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(200 / 72, 200 / 72), alpha=False)
+            image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+            pages.append(pytesseract.image_to_string(image))
+    except Exception as exc:
+        error_text = str(exc).lower()
+        if "tesseract is not installed" in error_text or "tesseractnotfound" in error_text:
+            raise PdfReadError(
+                "OCR needs Tesseract OCR installed. Install Tesseract and optionally set TESSERACT_CMD in .env."
+            ) from exc
+        raise PdfReadError("OCR could not process this PDF. Try a clearer scan.") from exc
+    finally:
+        document.close()
+
+    return "\n".join(pages).strip()
 
 
 def extract_text_from_docx(docx_path: str | Path) -> str:
@@ -84,3 +135,24 @@ def extract_text_from_docx(docx_path: str | Path) -> str:
     if len(text) < 50:
         raise PdfReadError("Could not extract enough text from the DOCX resume.")
     return text
+
+
+def _find_tesseract_executable() -> str | None:
+    """Find a Tesseract executable from explicit config, PATH, or common Windows paths."""
+    if TESSERACT_CMD and Path(TESSERACT_CMD).exists():
+        return TESSERACT_CMD
+
+    on_path = shutil.which("tesseract")
+    if on_path:
+        return on_path
+
+    if os.name == "nt":
+        candidates = [
+            Path(os.environ.get("ProgramFiles", "")) / "Tesseract-OCR" / "tesseract.exe",
+            Path(os.environ.get("ProgramFiles(x86)", "")) / "Tesseract-OCR" / "tesseract.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Tesseract-OCR" / "tesseract.exe",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+    return None
