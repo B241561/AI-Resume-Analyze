@@ -1,11 +1,119 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from typing import Any
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GROQ_MODEL, get_groq_api_key
+
+
+logger = logging.getLogger(__name__)
+
+
+
+
+
+_GROQ_RESPONSE_FIELDS = [
+    "summary",
+    "ats_score",
+    "technical_skills",
+    "soft_skills",
+    "missing_skills",
+    "strengths",
+    "weaknesses",
+    "grammar_suggestions",
+    "recommendations",
+    "match_percentage",
+    "missing_keywords",
+    "missing_job_skills",
+    "match_explanation",
+]
+_GROQ_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string"},
+        "ats_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "technical_skills": {"type": "array", "items": {"type": "string"}},
+        "soft_skills": {"type": "array", "items": {"type": "string"}},
+        "missing_skills": {"type": "array", "items": {"type": "string"}},
+        "strengths": {"type": "array", "items": {"type": "string"}},
+        "weaknesses": {"type": "array", "items": {"type": "string"}},
+        "grammar_suggestions": {"type": "array", "items": {"type": "string"}},
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+        "match_percentage": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+        "missing_keywords": {"type": "array", "items": {"type": "string"}},
+        "missing_job_skills": {"type": "array", "items": {"type": "string"}},
+        "match_explanation": {"type": "string"},
+    },
+    "required": _GROQ_RESPONSE_FIELDS,
+}
+
+
+class GroqRequestError(RuntimeError):
+    def __init__(self, category: str) -> None:
+        self.category = category
+        super().__init__(category)
+
+
+class GroqMalformedResponseError(ValueError):
+    pass
+
+
+def classify_groq_error(error: Exception) -> str:
+    # Explicit, already-classified or genuinely malformed-response errors first.
+    if isinstance(error, GroqRequestError):
+        return error.category
+    if isinstance(error, (GroqMalformedResponseError, json.JSONDecodeError)):
+        return "malformed_response"
+
+    try:
+        import groq
+    except ImportError:
+        groq = None
+
+    if groq and isinstance(error, groq.RateLimitError):
+        return "quota_or_rate_limit"
+    if groq and isinstance(error, (groq.AuthenticationError, groq.PermissionDeniedError)):
+        return "authentication"
+    if groq and isinstance(error, groq.NotFoundError):
+        return "model_unavailable"
+    if groq and isinstance(error, (groq.APIConnectionError, groq.APITimeoutError)):
+        return "network"
+    if groq and isinstance(error, groq.APIStatusError):
+        code = getattr(error, "status_code", None)
+        if code == 429:
+            return "quota_or_rate_limit"
+        if code in {401, 403}:
+            return "authentication"
+        if code == 404:
+            return "model_unavailable"
+        if code in {408, 500, 502, 503, 504}:
+            return "network"
+
+    error_module = type(error).__module__
+    if error_module.startswith(("httpx", "httpcore")) or isinstance(
+        error, (TimeoutError, ConnectionError)
+    ):
+        return "network"
+
+    # Generic TypeError / ValueError can be a request, SDK or configuration problem,
+    # so they must NOT be reported as "invalid response".
+    return "unknown_provider_error"
+
+
+def groq_error_message(error: Exception) -> str:
+    messages = {
+        "authentication": "Groq authentication failed. Check GROQ_API_KEY.",
+        "model_unavailable": "Groq model unavailable. Check GROQ_MODEL.",
+        "quota_or_rate_limit": "Groq quota or rate limit reached. Try again later.",
+        "network": "Groq network request failed. Check your connection.",
+        "malformed_response": "Groq returned an invalid response. Try again.",
+        "unknown_provider_error": "Groq request failed. Check the model and connection.",
+    }
+    return messages.get(classify_groq_error(error), messages["unknown_provider_error"])
 
 
 # Canonical skill names mapped to common resume/job-description aliases.
@@ -79,66 +187,142 @@ ACTION_VERBS = {
 def analyze_resume(
     resume_text: str,
     job_description: str = "",
-    use_gemini: bool = True,
+    use_groq: bool = True,
 ) -> dict[str, Any]:
     """Analyze a resume with explicit privacy control and a deterministic ATS rubric.
 
-    ATS readiness is always calculated locally from observable resume evidence. Gemini is
+    ATS readiness is always calculated locally from observable resume evidence. Groq is
     used only for richer qualitative feedback and contextual job matching when enabled.
     """
     job_description = job_description.strip()
-    if use_gemini and GEMINI_API_KEY:
+    if use_groq and get_groq_api_key():
         try:
-            return _analyze_with_gemini(resume_text, job_description)
-        except Exception:
+            return _analyze_with_groq(resume_text, job_description)
+        except Exception as exc:
+            category = classify_groq_error(exc)
+            logger.warning("Groq analysis failed: %s error; using local fallback", category)
             result = _fallback_analysis(resume_text, job_description)
-            result["analysis_mode"] = "Gemini unavailable; local analysis used"
+            result["analysis_mode"] = "Groq unavailable; local analysis used"
             return result
     return _fallback_analysis(resume_text, job_description)
 
 
-def _analyze_with_gemini(resume_text: str, job_description: str) -> dict[str, Any]:
-    import google.generativeai as genai
+def _analyze_with_groq(resume_text: str, job_description: str) -> dict[str, Any]:
+    from groq import Groq
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    match_instructions = (
-        "Calculate a match score using the supplied job description. Judge fit across responsibilities, required skills, "
-        "tools, seniority, and relevant experience."
-        if job_description.strip()
-        else "No job description was provided. Do not calculate or infer a job match; return null for match_percentage, "
-        "'No job description provided.' for match_explanation, and empty job-specific lists. Do not evaluate job fit."
+    api_key = get_groq_api_key()
+    if not api_key:
+        raise GroqRequestError("authentication")
+
+    has_job_description = bool(job_description.strip())
+    job_instructions = (
+        "A job description is provided. Compare the resume and job description, identify only "
+        "supported missing keywords and skills, calculate match_percentage as an integer from 0 to 100, "
+        "and give relevant role-specific recommendations."
+        if has_job_description
+        else "No job description is provided. Set match_percentage to null; DO NOT calculate or infer "
+        "Job Match, missing keywords, or missing job skills. Set those arrays to empty. Provide only "
+        "resume-focused recommendations."
     )
     prompt = f"""
-Analyze this resume and return only valid JSON with these keys:
-summary, technical_skills, soft_skills, missing_skills,
-strengths, weaknesses, grammar_suggestions, recommendations,
-match_percentage, missing_keywords, missing_job_skills, match_explanation.
+You are analyzing a resume. Return ONLY structured JSON matching the supplied schema.
+Do not invent facts. ATS score must be an integer from 0 to 100; the application will recalculate
+it locally. Recommendations must be an array of concise actionable strings.
 
-Important rules:
-- Do NOT generate an ATS score. The application calculates ATS readiness locally from an
-  auditable rubric using resume evidence.
-- {match_instructions}
-- Do not invent experience, skills, qualifications, or achievements that are not present.
-- Do not make job-specific recommendations or infer missing keywords/skills when no job
-    description is supplied.
+{job_instructions}
+
+Keep every skill, weakness, strength, keyword, and recommendation grounded in the resume and,
+when present, the supplied job description.
 
 Resume:
 {resume_text[:18000]}
 
 Job description:
-{job_description[:12000] or "No job description provided."}
+{job_description[:12000] if has_job_description else "No job description provided."}
 """
-    response = model.generate_content(prompt)
-    result = _normalize_result(
-        _extract_json(getattr(response, "text", "")), resume_text, job_description
-    )
-    result["ats_score"], result["ats_breakdown"] = calculate_ats_readiness(resume_text, job_description)
-    result["analysis_mode"] = "Gemini AI + local ATS rubric"
-    result["match_method"] = (
-        "Gemini contextual job-fit assessment" if job_description.strip() else "Not calculated"
-    )
-    return result
+    client = Groq(api_key=api_key, max_retries=0, timeout=45.0)
+    try:
+        completion = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "Analyze resumes faithfully and follow the supplied JSON schema."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "resume_analysis",
+                    "strict": True,
+                    "schema": _GROQ_RESPONSE_SCHEMA,
+                },
+            },
+            temperature=0.2,
+            max_completion_tokens=1800,
+        )
+        if not completion.choices:
+            raise GroqMalformedResponseError()
+        message = completion.choices[0].message
+        response_text = message.content
+        if not isinstance(response_text, str) or not response_text.strip():
+            raise GroqMalformedResponseError()
+        try:
+            response_data = _extract_json(response_text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise GroqMalformedResponseError() from None
+        if not isinstance(response_data, dict):
+            raise GroqMalformedResponseError()
+
+        result = _normalize_result(response_data, resume_text, job_description)
+        result["ats_score"], result["ats_breakdown"] = calculate_ats_readiness(
+            resume_text, job_description
+        )
+        result["analysis_mode"] = "Groq analysis + local ATS rubric"
+        result["match_method"] = (
+            "Groq contextual job-fit assessment" if has_job_description else "Not calculated"
+        )
+        return result
+    finally:
+        try:
+            client.close()
+        except Exception:
+            logger.warning("Groq client cleanup failed.")
+
+
+def test_groq_connection(api_key: str) -> None:
+    from groq import Groq
+
+    if not api_key or not api_key.strip():
+        raise GroqRequestError("authentication")
+
+    client = None
+    try:
+        client = Groq(api_key=api_key.strip(), max_retries=0, timeout=30.0)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": "Reply with OK."}],
+            max_completion_tokens=8,
+            temperature=0,
+        )
+        content = response.choices[0].message.content if response.choices else None
+        if not isinstance(content, str) or not content.strip():
+            raise GroqMalformedResponseError()
+    except GroqRequestError:
+        raise
+    except Exception as exc:
+        category = classify_groq_error(exc)
+        # Log only the category and exception type; never the message (may echo credentials).
+        logger.warning(
+            "Groq connection failed: %s error (%s)",
+            category,
+            type(exc).__name__,
+        )
+        raise GroqRequestError(category) from None
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.warning("Groq client cleanup failed.")
 
 
 def _extract_json(text: str) -> dict[str, Any]:
