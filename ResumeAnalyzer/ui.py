@@ -311,17 +311,22 @@ class ResumeAnalyzerApp(ctk.CTk):
         details = (
             "Project Name: AI Resume Analyzer\n"
             "Version: 2.0\n"
-            "Developer: Chander Kant\n"
-            "Course: B.Tech Data Science\n"
-            "Year: 3rd Year"
+            "Developer: Arman Kaushik\n"
+            "Course: B.Tech Computer Science and Engineering (CSE)\n"
+            "College: Swami Keshvanand Institute of Technology, Management & Gramothan (SKIT), Jaipur\n"
+            "Semester: 3rd Semester\n"
+            "Project Type: AI-powered desktop application"
         )
-        ctk.CTkLabel(container, text=details, justify="left", anchor="w").grid(
+        ctk.CTkLabel(container, text=details, justify="left", anchor="w", wraplength=520).grid(
             row=1, column=0, padx=12, pady=(8, 12), sticky="ew"
         )
 
         description = (
-            "AI Resume Analyzer is a desktop application that extracts resume text, uses a deterministic local ATS-readiness rubric, "
-            "supports scanned PDF OCR, performs weighted/semantic job matching, and can optionally use Google Gemini for contextual feedback."
+            "AI Resume Analyzer processes PDF and DOCX resumes, extracts text (including scanned PDFs through Tesseract OCR), "
+            "and provides ATS-oriented readiness scoring, technical and soft-skill extraction, job-description matching, and "
+            "practical improvement recommendations. Analysis runs locally by default with a deterministic fallback; optional "
+            "Gemini assistance adds contextual feedback and job matching. Analysis history is stored in local SQLite without "
+            "retaining raw resume or job-description text, and results can be exported as PDF reports."
         )
         ctk.CTkLabel(
             container,
