@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# Local application data
+resume_analyzer.db
+app.log
+
+# Generated reports / temporary files
+reports/
+temp/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store

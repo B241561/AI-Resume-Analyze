@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+import logging
+import threading
+from pathlib import Path
+from tkinter import filedialog, messagebox
+from typing import Any
+
+import customtkinter as ctk
+
+from analyzer import analyze_resume
+from config import ASSETS_DIR
+from database import list_recent_analyses, save_analysis
+from pdf_reader import PdfReadError, extract_text_from_file
+from report_generator import export_analysis_pdf
+
+
+logger = logging.getLogger(__name__)
+
+
+class ResumeAnalyzerApp(ctk.CTk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("AI Resume Analyzer")
+        self.geometry("1180x760")
+        self.minsize(980, 640)
+
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        self.selected_file: Path | None = None
+        self.current_analysis: dict[str, Any] | None = None
+        self.current_file_name = ""
+
+        self._set_icon()
+        self._build_layout()
+        self._load_history()
+
+    def _set_icon(self) -> None:
+        icon_path = ASSETS_DIR / "app_icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                logger.warning("Could not load application icon.")
+
+    def _build_layout(self) -> None:
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        sidebar = ctk.CTkFrame(self, width=330, corner_radius=0)
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_rowconfigure(5, weight=1)
+
+        title = ctk.CTkLabel(sidebar, text="AI Resume Analyzer", font=ctk.CTkFont(size=24, weight="bold"))
+        title.grid(row=0, column=0, padx=22, pady=(24, 8), sticky="w")
+
+        subtitle = ctk.CTkLabel(sidebar, text="Supports PDF and DOCX resumes", text_color="#94A3B8")
+        subtitle.grid(row=1, column=0, padx=22, pady=(0, 18), sticky="w")
+
+        self.file_label = ctk.CTkLabel(sidebar, text="No PDF or DOCX selected", anchor="w", wraplength=270)
+        self.file_label.grid(row=2, column=0, padx=22, pady=(0, 10), sticky="ew")
+
+        pick_button = ctk.CTkButton(sidebar, text="Choose Resume File", command=self._choose_resume_file)
+        pick_button.grid(row=3, column=0, padx=22, pady=(0, 18), sticky="ew")
+
+        history_title = ctk.CTkLabel(sidebar, text="Previous Analyses", font=ctk.CTkFont(size=16, weight="bold"))
+        history_title.grid(row=4, column=0, padx=22, pady=(0, 8), sticky="sw")
+
+        self.history_box = ctk.CTkTextbox(sidebar, height=180, activate_scrollbars=True)
+        self.history_box.grid(row=5, column=0, padx=22, pady=(0, 22), sticky="nsew")
+        self.history_box.configure(state="disabled")
+
+        about_button = ctk.CTkButton(sidebar, text="About", command=self._show_about_dialog)
+        about_button.grid(row=6, column=0, padx=22, pady=(0, 22), sticky="ew")
+
+        content = ctk.CTkFrame(self, fg_color="transparent")
+        content.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(2, weight=1)
+
+        input_card = ctk.CTkFrame(content)
+        input_card.grid(row=0, column=0, sticky="ew")
+        input_card.grid_columnconfigure(0, weight=1)
+
+        jd_label = ctk.CTkLabel(input_card, text="Optional Job Description", font=ctk.CTkFont(size=16, weight="bold"))
+        jd_label.grid(row=0, column=0, padx=18, pady=(16, 8), sticky="w")
+
+        self.job_textbox = ctk.CTkTextbox(input_card, height=110)
+        self.job_textbox.grid(row=1, column=0, padx=18, pady=(0, 16), sticky="ew")
+
+        action_row = ctk.CTkFrame(input_card, fg_color="transparent")
+        action_row.grid(row=2, column=0, padx=18, pady=(0, 16), sticky="ew")
+        action_row.grid_columnconfigure(2, weight=1)
+
+        self.analyze_button = ctk.CTkButton(action_row, text="Analyze Resume", command=self._start_analysis)
+        self.analyze_button.grid(row=0, column=0, padx=(0, 10), sticky="w")
+
+        self.export_button = ctk.CTkButton(action_row, text="Export PDF", command=self._export_report, state="disabled")
+        self.export_button.grid(row=0, column=1, padx=(0, 10), sticky="w")
+
+        self.progress = ctk.CTkProgressBar(action_row, mode="indeterminate")
+        self.progress.grid(row=0, column=2, sticky="ew")
+        self.progress.stop()
+        self.progress.grid_remove()
+
+        scores = ctk.CTkFrame(content, fg_color="transparent")
+        scores.grid(row=1, column=0, pady=16, sticky="ew")
+        scores.grid_columnconfigure((0, 1), weight=1)
+
+        self.ats_card = ScoreCard(scores, "ATS Score")
+        self.ats_card.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.match_card = ScoreCard(scores, "Job Match")
+        self.match_card.grid(row=0, column=1, padx=(8, 0), sticky="ew")
+
+        self.results_frame = ctk.CTkScrollableFrame(content)
+        self.results_frame.grid(row=2, column=0, sticky="nsew")
+        self.results_frame.grid_columnconfigure((0, 1), weight=1)
+        self._show_empty_state()
+
+    def _choose_resume_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Choose Resume File",
+            filetypes=[
+                ("Resume Files", "*.pdf *.docx"),
+                ("PDF Files", "*.pdf"),
+                ("Word Documents", "*.docx"),
+            ],
+        )
+        if not path:
+            return
+        self.selected_file = Path(path)
+        self.file_label.configure(text=self.selected_file.name)
+
+    def _start_analysis(self) -> None:
+        if not self.selected_file:
+            messagebox.showwarning("Resume required", "Please choose a PDF or DOCX resume first.")
+            return
+
+        resume_path = self.selected_file
+        job_description = self.job_textbox.get("1.0", "end").strip()
+        self._set_busy(True)
+        thread = threading.Thread(target=self._run_analysis, args=(resume_path, job_description), daemon=True)
+        thread.start()
+
+    def _run_analysis(self, resume_path: Path, job_description: str) -> None:
+        try:
+            resume_text = extract_text_from_file(resume_path)
+            analysis = analyze_resume(resume_text, job_description)
+            analysis_id = save_analysis(resume_path, resume_text, job_description, analysis)
+            analysis["id"] = analysis_id
+            self.after(0, lambda: self._analysis_completed(resume_path.name, analysis))
+        except PdfReadError as exc:
+            message = str(exc)
+            self.after(0, lambda: self._show_error(message))
+        except Exception:
+            logger.exception("Analysis failed")
+            self.after(0, lambda: self._show_error("Analysis failed. Check logs/app.log for details."))
+
+    def _analysis_completed(self, file_name: str, analysis: dict[str, Any]) -> None:
+        self.current_file_name = file_name
+        self.current_analysis = analysis
+        self._set_busy(False)
+        self.export_button.configure(state="normal")
+        self._render_analysis(analysis)
+        self._load_history()
+
+    def _show_error(self, message: str) -> None:
+        self._set_busy(False)
+        messagebox.showerror("Error", message)
+
+    def _set_busy(self, busy: bool) -> None:
+        if busy:
+            self.analyze_button.configure(state="disabled")
+            self.export_button.configure(state="disabled")
+            self.progress.grid()
+            self.progress.start()
+        else:
+            self.analyze_button.configure(state="normal")
+            self.progress.stop()
+            self.progress.grid_remove()
+            if self.current_analysis:
+                self.export_button.configure(state="normal")
+
+    def _render_analysis(self, analysis: dict[str, Any]) -> None:
+        self._clear_results()
+        self.ats_card.set_score(int(analysis.get("ats_score", 0)))
+        self.match_card.set_score(int(analysis.get("match_percentage", 0)))
+
+        SummaryCard(self.results_frame, "Resume Summary", analysis.get("summary", "")).grid(
+            row=0, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+        )
+
+        cards = [
+            ("Technical Skills", analysis.get("technical_skills", [])),
+            ("Soft Skills", analysis.get("soft_skills", [])),
+            ("Missing Skills", analysis.get("missing_skills", [])),
+            ("Strengths", analysis.get("strengths", [])),
+            ("Weaknesses", analysis.get("weaknesses", [])),
+            ("Grammar Suggestions", analysis.get("grammar_suggestions", [])),
+            ("Recommendations", analysis.get("recommendations", [])),
+            ("Missing Keywords", analysis.get("missing_keywords", [])),
+            ("Missing Job Skills", analysis.get("missing_job_skills", [])),
+        ]
+
+        for index, (title, items) in enumerate(cards, start=1):
+            row = (index + 1) // 2
+            column = (index + 1) % 2
+            ListCard(self.results_frame, title, items).grid(row=row, column=column, padx=6, pady=6, sticky="nsew")
+
+    def _show_empty_state(self) -> None:
+        self._clear_results()
+        label = ctk.CTkLabel(
+            self.results_frame,
+            text="Choose a resume PDF or DOCX and click Analyze Resume.",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color="#CBD5E1",
+        )
+        label.grid(row=0, column=0, padx=24, pady=80, sticky="ew")
+
+    def _clear_results(self) -> None:
+        for child in self.results_frame.winfo_children():
+            child.destroy()
+
+    def _export_report(self) -> None:
+        if not self.current_analysis:
+            messagebox.showwarning("No analysis", "Analyze a resume before exporting.")
+            return
+        try:
+            output_path = export_analysis_pdf(self.current_file_name, self.current_analysis)
+            messagebox.showinfo("Report exported", f"Saved report to:\n{output_path}")
+        except Exception:
+            logger.exception("Report export failed")
+            messagebox.showerror("Export failed", "Could not export the PDF report.")
+
+    def _load_history(self) -> None:
+        history = list_recent_analyses()
+        lines = [
+            f"#{item['id']}  {item['file_name']}\nATS: {item['ats_score']} | Match: {item['match_percentage']}%\n"
+            for item in history
+        ]
+        self.history_box.configure(state="normal")
+        self.history_box.delete("1.0", "end")
+        self.history_box.insert("1.0", "\n".join(lines) if lines else "No saved analyses yet.")
+        self.history_box.configure(state="disabled")
+
+    def _show_about_dialog(self) -> None:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("About AI Resume Analyzer")
+        dialog.geometry("560x620")
+        dialog.minsize(520, 560)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
+
+        container = ctk.CTkScrollableFrame(dialog)
+        container.grid(row=0, column=0, padx=18, pady=18, sticky="nsew")
+        container.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            container,
+            text="AI Resume Analyzer",
+            font=ctk.CTkFont(size=24, weight="bold"),
+        ).grid(row=0, column=0, padx=12, pady=(8, 4), sticky="w")
+
+        details = (
+            "Project Name: AI Resume Analyzer\n"
+            "Version: 1.0\n"
+            "Developer: Chander Kant\n"
+            "Course: B.Tech Data Science\n"
+            "Year: 3rd Year"
+        )
+        ctk.CTkLabel(container, text=details, justify="left", anchor="w").grid(
+            row=1, column=0, padx=12, pady=(8, 12), sticky="ew"
+        )
+
+        description = (
+            "AI Resume Analyzer is a desktop application that analyzes PDF and DOCX resumes using "
+            "Google's Gemini AI, estimates ATS compatibility, extracts skills, compares resumes "
+            "with job descriptions, and generates detailed PDF reports."
+        )
+        ctk.CTkLabel(
+            container,
+            text="Project Description",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=2, column=0, padx=12, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(container, text=description, wraplength=480, justify="left").grid(
+            row=3, column=0, padx=12, pady=(0, 12), sticky="ew"
+        )
+
+        references = "\n".join(
+            [
+                "- Google Gemini API\n  https://ai.google.dev/",
+                "- Python\n  https://docs.python.org/",
+                "- CustomTkinter\n  https://customtkinter.tomschimansky.com/",
+                "- PyMuPDF\n  https://pymupdf.readthedocs.io/",
+                "- python-docx\n  https://python-docx.readthedocs.io/",
+                "- SQLite\n  https://sqlite.org/",
+                "- ReportLab\n  https://www.reportlab.com/",
+            ]
+        )
+        ctk.CTkLabel(
+            container,
+            text="References",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=4, column=0, padx=12, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(container, text=references, justify="left").grid(
+            row=5, column=0, padx=12, pady=(0, 12), sticky="w"
+        )
+
+        acknowledgements = (
+            "This application uses open-source software including Python, CustomTkinter, "
+            "PyMuPDF, python-docx, ReportLab, SQLite, and Google Gemini API."
+        )
+        ctk.CTkLabel(
+            container,
+            text="Acknowledgements",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=6, column=0, padx=12, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(container, text=acknowledgements, wraplength=480, justify="left").grid(
+            row=7, column=0, padx=12, pady=(0, 18), sticky="ew"
+        )
+
+        ctk.CTkButton(container, text="Close", command=dialog.destroy).grid(
+            row=8, column=0, padx=12, pady=(0, 12), sticky="e"
+        )
+
+
+class ScoreCard(ctk.CTkFrame):
+    def __init__(self, parent: ctk.CTkBaseClass, title: str) -> None:
+        super().__init__(parent)
+        self.title_label = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"))
+        self.title_label.grid(row=0, column=0, padx=18, pady=(16, 4), sticky="w")
+
+        self.score_label = ctk.CTkLabel(self, text="0", font=ctk.CTkFont(size=36, weight="bold"))
+        self.score_label.grid(row=1, column=0, padx=18, pady=(0, 8), sticky="w")
+
+        self.progress = ctk.CTkProgressBar(self)
+        self.progress.grid(row=2, column=0, padx=18, pady=(0, 18), sticky="ew")
+        self.grid_columnconfigure(0, weight=1)
+        self.set_score(0)
+
+    def set_score(self, score: int) -> None:
+        score = max(0, min(100, score))
+        self.score_label.configure(text=f"{score}/100")
+        self.progress.set(score / 100)
+
+
+class SummaryCard(ctk.CTkFrame):
+    def __init__(self, parent: ctk.CTkBaseClass, title: str, text: str) -> None:
+        super().__init__(parent)
+        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, padx=16, pady=(14, 8), sticky="w"
+        )
+        ctk.CTkLabel(self, text=text or "No summary available.", wraplength=760, justify="left").grid(
+            row=1, column=0, padx=16, pady=(0, 14), sticky="ew"
+        )
+        self.grid_columnconfigure(0, weight=1)
+
+
+class ListCard(ctk.CTkFrame):
+    def __init__(self, parent: ctk.CTkBaseClass, title: str, items: list[str]) -> None:
+        super().__init__(parent)
+        self.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(14, 8), sticky="w"
+        )
+        body = "\n".join(f"- {item}" for item in items) if items else "No items available."
+        ctk.CTkLabel(self, text=body, wraplength=390, justify="left").grid(
+            row=1, column=0, padx=14, pady=(0, 14), sticky="nw"
+        )
