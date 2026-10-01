@@ -86,12 +86,14 @@ def analyze_resume(
     ATS readiness is always calculated locally from observable resume evidence. Gemini is
     used only for richer qualitative feedback and contextual job matching when enabled.
     """
+    job_description = job_description.strip()
     if use_gemini and GEMINI_API_KEY:
         try:
             return _analyze_with_gemini(resume_text, job_description)
         except Exception:
-            # Keep the application usable if Gemini is unavailable or returns invalid data.
-            return _fallback_analysis(resume_text, job_description)
+            result = _fallback_analysis(resume_text, job_description)
+            result["analysis_mode"] = "Gemini unavailable; local analysis used"
+            return result
     return _fallback_analysis(resume_text, job_description)
 
 
@@ -100,6 +102,13 @@ def _analyze_with_gemini(resume_text: str, job_description: str) -> dict[str, An
 
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(GEMINI_MODEL)
+    match_instructions = (
+        "Calculate a match score using the supplied job description. Judge fit across responsibilities, required skills, "
+        "tools, seniority, and relevant experience."
+        if job_description.strip()
+        else "No job description was provided. Do not calculate or infer a job match; return null for match_percentage, "
+        "'No job description provided.' for match_explanation, and empty job-specific lists. Do not evaluate job fit."
+    )
     prompt = f"""
 Analyze this resume and return only valid JSON with these keys:
 summary, technical_skills, soft_skills, missing_skills,
@@ -109,25 +118,26 @@ match_percentage, missing_keywords, missing_job_skills, match_explanation.
 Important rules:
 - Do NOT generate an ATS score. The application calculates ATS readiness locally from an
   auditable rubric using resume evidence.
-- Use integer match_percentage from 0 to 100 only when a job description is supplied.
-- Judge job fit contextually across responsibilities, required skills, tools, seniority,
-  and relevant experience. Do not treat every common word as a match.
+- {match_instructions}
 - Do not invent experience, skills, qualifications, or achievements that are not present.
-- If no job description is supplied, set match_percentage to 0, match_explanation to an
-  empty string, and job-specific lists to empty arrays.
+- Do not make job-specific recommendations or infer missing keywords/skills when no job
+    description is supplied.
 
 Resume:
 {resume_text[:18000]}
 
 Job description:
-{job_description[:12000]}
+{job_description[:12000] or "No job description provided."}
 """
     response = model.generate_content(prompt)
-    result = _normalize_result(_extract_json(getattr(response, "text", "")), job_description)
+    result = _normalize_result(
+        _extract_json(getattr(response, "text", "")), resume_text, job_description
+    )
     result["ats_score"], result["ats_breakdown"] = calculate_ats_readiness(resume_text, job_description)
     result["analysis_mode"] = "Gemini AI + local ATS rubric"
-    result["match_method"] = "Gemini contextual job-fit assessment"
-    result["match_percentage"] = _score(result.get("match_percentage", 0)) if job_description.strip() else 0
+    result["match_method"] = (
+        "Gemini contextual job-fit assessment" if job_description.strip() else "Not calculated"
+    )
     return result
 
 
@@ -148,13 +158,41 @@ def _fallback_analysis(resume_text: str, job_description: str) -> dict[str, Any]
     technical = sorted(_title(skill) for skill in TECH_SKILLS if _contains_skill(lower_resume, skill))
     soft = sorted(_title(skill) for skill in SOFT_SKILLS if skill in lower_resume)
 
-    match_percentage, missing_keywords, missing_job_skills, match_explanation = _compare_to_job(
-        resume_text, job_description
-    )
+    if job_description.strip():
+        (
+            match_percentage,
+            missing_keywords,
+            missing_job_skills,
+            match_explanation,
+            match_method,
+        ) = _compare_to_job(resume_text, job_description)
+        match_available = True
+        match_status = "calculated"
+        weaknesses = [
+            "Some bullets may need measurable outcomes.",
+            "The resume may need more keywords from the target job description.",
+        ]
+    else:
+        match_percentage = None
+        missing_keywords = []
+        missing_job_skills = []
+        match_explanation = "No job description provided."
+        match_method = "Not calculated"
+        match_available = False
+        match_status = "not_available"
+        weaknesses = [
+            "Some bullets may need measurable outcomes.",
+            "Some sections or achievements may need more detail.",
+        ]
     ats_score, ats_breakdown = calculate_ats_readiness(resume_text, job_description)
+    summary = (
+        "This resume has a clear base profile. Add role-specific keywords, measurable results, and stronger project impact to improve ATS readiness."
+        if job_description
+        else "This resume has a clear base profile. Strengthen measurable results, section completeness, and project impact to improve ATS readiness."
+    )
 
     return {
-        "summary": "This resume has a clear base profile. Add role-specific keywords, measurable results, and stronger project impact to improve ATS readiness.",
+        "summary": summary,
         "ats_score": ats_score,
         "ats_breakdown": ats_breakdown,
         "technical_skills": technical,
@@ -164,25 +202,22 @@ def _fallback_analysis(resume_text: str, job_description: str) -> dict[str, Any]
             "Includes readable sections that are useful for ATS parsing.",
             "Shows relevant skills and project or experience details.",
         ],
-        "weaknesses": [
-            "Some bullets may need measurable outcomes.",
-            "The resume may need more keywords from the target job description.",
-        ],
+        "weaknesses": weaknesses,
         "grammar_suggestions": [
             "Use consistent tense and punctuation in all bullets.",
             "Keep formatting simple and avoid complex tables.",
         ],
-        "recommendations": [
-            "Start bullets with action verbs.",
-            "Add numbers such as percentages, counts, or time saved.",
-            "Move the strongest technical skills near the top.",
-        ],
+        "recommendations": _generate_recommendations(
+            ats_breakdown, technical, missing_keywords, missing_job_skills
+        ),
         "match_percentage": match_percentage,
+        "match_available": match_available,
+        "match_status": match_status,
         "missing_keywords": missing_keywords,
         "missing_job_skills": missing_job_skills,
         "match_explanation": match_explanation,
         "analysis_mode": "Local analysis",
-        "match_method": "Local TF-IDF + skill coverage",
+        "match_method": match_method,
     }
 
 
@@ -267,9 +302,11 @@ def calculate_ats_readiness(resume_text: str, job_description: str = "") -> tupl
     return total, weighted_breakdown
 
 
-def _compare_to_job(resume_text: str, job_description: str) -> tuple[int, list[str], list[str], str]:
+def _compare_to_job(
+    resume_text: str, job_description: str
+) -> tuple[int | None, list[str], list[str], str, str]:
     if not job_description.strip():
-        return 0, [], [], ""
+        return None, [], [], "No job description provided.", "Not calculated"
 
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
@@ -320,7 +357,7 @@ def _compare_to_job(resume_text: str, job_description: str) -> tuple[int, list[s
         if required_skills
         else "The local matcher uses TF-IDF similarity over the resume and job description because no known technical skills were detected."
     )
-    return min(match_percentage, 100), missing_keywords, missing_skills, explanation
+    return min(match_percentage, 100), missing_keywords, missing_skills, explanation, method
 
 
 def _important_words(text: str) -> set[str]:
@@ -332,8 +369,12 @@ def _important_words(text: str) -> set[str]:
     return {word for word in words if word not in stop_words}
 
 
-def _normalize_result(result: dict[str, Any], job_description: str) -> dict[str, Any]:
-    defaults = _fallback_analysis("", job_description)
+def _normalize_result(
+    result: dict[str, Any], resume_text: str, job_description: str
+) -> dict[str, Any]:
+    has_job_description = bool(job_description.strip())
+    local_result = _fallback_analysis(resume_text, job_description)
+    defaults = local_result.copy()
     defaults.update(result)
     for key in [
         "technical_skills",
@@ -347,9 +388,46 @@ def _normalize_result(result: dict[str, Any], job_description: str) -> dict[str,
         "missing_job_skills",
     ]:
         defaults[key] = _as_list(defaults.get(key, []))
-    defaults["ats_score"] = _score(defaults.get("ats_score", 0))
-    defaults["match_percentage"] = _score(defaults.get("match_percentage", 0))
-    defaults["match_explanation"] = str(defaults.get("match_explanation", ""))
+    recommendations = [
+        item.strip()
+        for item in defaults["recommendations"]
+        if item.strip() and item.strip().casefold() not in {"no items available", "no items available."}
+    ]
+    ats_score, ats_breakdown = calculate_ats_readiness(resume_text, job_description)
+    defaults["ats_score"] = ats_score
+    defaults["ats_breakdown"] = ats_breakdown
+
+    if has_job_description:
+        raw_match = result.get("match_percentage")
+        try:
+            numeric_match = float(raw_match)
+            if isinstance(raw_match, bool) or not math.isfinite(numeric_match):
+                raise ValueError
+            defaults["match_percentage"] = _score(numeric_match)
+        except (TypeError, ValueError, OverflowError):
+            defaults["match_percentage"] = local_result["match_percentage"]
+        defaults["match_available"] = True
+        defaults["match_status"] = "calculated"
+        defaults["match_explanation"] = str(
+            defaults.get("match_explanation") or local_result["match_explanation"]
+        )
+        defaults["recommendations"] = recommendations or _generate_recommendations(
+            ats_breakdown,
+            defaults["technical_skills"],
+            defaults["missing_keywords"],
+            defaults["missing_job_skills"],
+        )
+    else:
+        defaults["match_percentage"] = None
+        defaults["match_available"] = False
+        defaults["match_status"] = "not_available"
+        defaults["match_method"] = "Not calculated"
+        defaults["match_explanation"] = "No job description provided."
+        defaults["missing_keywords"] = []
+        defaults["missing_job_skills"] = []
+        defaults["recommendations"] = _generate_recommendations(
+            ats_breakdown, local_result["technical_skills"], [], []
+        )
     return defaults
 
 
@@ -378,6 +456,36 @@ def _as_list(value: Any) -> list[str]:
     if not value:
         return []
     return [str(value)]
+
+
+def _generate_recommendations(
+    ats_breakdown: dict[str, int],
+    technical_skills: list[str],
+    missing_keywords: list[str],
+    missing_job_skills: list[str],
+) -> list[str]:
+    recommendations: list[str] = []
+    if ats_breakdown.get("measurable_impact", 0) < 12:
+        recommendations.append("Add measurable outcomes to experience and project bullets.")
+    if missing_keywords:
+        keywords = ", ".join(missing_keywords[:5])
+        recommendations.append(f"Add missing job-specific keywords where accurate: {keywords}.")
+    if missing_job_skills:
+        skills = ", ".join(missing_job_skills[:5])
+        recommendations.append(f"Strengthen evidence for required technical skills: {skills}.")
+    if ats_breakdown.get("technical_skills", 0) < 10 or not technical_skills:
+        recommendations.append("Strengthen technical skill evidence with specific tools and project examples.")
+    if ats_breakdown.get("resume_sections", 0) < 16:
+        recommendations.append("Improve section completeness with clearly labeled skills, education, projects, and experience.")
+    if ats_breakdown.get("action_language", 0) < 7:
+        recommendations.append("Use clearer action verbs to describe contributions and results.")
+    if ats_breakdown.get("parseability", 0) < 20:
+        recommendations.append("Use consistent formatting, readable bullets, and simple section layouts.")
+    if ats_breakdown.get("contact_and_links", 0) < 10:
+        recommendations.append("Add complete contact details and relevant professional links.")
+    if not recommendations:
+        recommendations.append("Tailor quantified achievements and relevant skills to each target role.")
+    return recommendations[:6]
 
 
 def _contains_heading(text: str, heading: str) -> bool:

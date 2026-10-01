@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -31,7 +32,7 @@ class ResumeAnalyzerApp(ctk.CTk):
         self.selected_file: Path | None = None
         self.current_analysis: dict[str, Any] | None = None
         self.current_file_name = ""
-        self.use_gemini_var = BooleanVar(value=False)
+        self.use_gemini_var = BooleanVar(value=bool(GEMINI_API_KEY))
 
         self._set_icon()
         self._build_layout()
@@ -90,17 +91,21 @@ class ResumeAnalyzerApp(ctk.CTk):
         self.job_textbox = ctk.CTkTextbox(input_card, height=110)
         self.job_textbox.grid(row=1, column=0, padx=18, pady=(0, 10), sticky="ew")
 
-        privacy_text = (
-            "Gemini is optional and OFF by default. When enabled, extracted resume/JD text is sent to the configured Google Gemini API. "
-            "When disabled, analysis stays local."
-        )
-        ctk.CTkLabel(
+        if GEMINI_API_KEY:
+            privacy_text = (
+                "Gemini is enabled by default. While enabled, extracted resume and job-description text is sent to the "
+                "configured Google Gemini API. Turn it off to keep analysis local."
+            )
+        else:
+            privacy_text = "Gemini unavailable — configure GEMINI_API_KEY to enable AI analysis. Local analysis remains available."
+        self.gemini_notice = ctk.CTkLabel(
             input_card,
             text=privacy_text,
             text_color="#94A3B8",
             wraplength=760,
             justify="left",
-        ).grid(row=2, column=0, padx=18, pady=(0, 8), sticky="w")
+        )
+        self.gemini_notice.grid(row=2, column=0, padx=18, pady=(0, 8), sticky="w")
 
         self.gemini_checkbox = ctk.CTkCheckBox(
             input_card,
@@ -115,16 +120,23 @@ class ResumeAnalyzerApp(ctk.CTk):
 
         action_row = ctk.CTkFrame(input_card, fg_color="transparent")
         action_row.grid(row=4, column=0, padx=18, pady=(0, 16), sticky="ew")
-        action_row.grid_columnconfigure(2, weight=1)
+        action_row.grid_columnconfigure(3, weight=1)
 
         self.analyze_button = ctk.CTkButton(action_row, text="Analyze Resume", command=self._start_analysis)
         self.analyze_button.grid(row=0, column=0, padx=(0, 10), sticky="w")
 
-        self.export_button = ctk.CTkButton(action_row, text="Export PDF", command=self._export_report, state="disabled")
+        self.export_button = ctk.CTkButton(
+            action_row, text="Download Report", command=self._export_report, state="disabled"
+        )
         self.export_button.grid(row=0, column=1, padx=(0, 10), sticky="w")
 
+        self.json_button = ctk.CTkButton(
+            action_row, text="Download JSON", command=self._export_json, state="disabled"
+        )
+        self.json_button.grid(row=0, column=2, padx=(0, 10), sticky="w")
+
         self.progress = ctk.CTkProgressBar(action_row, mode="indeterminate")
-        self.progress.grid(row=0, column=2, sticky="ew")
+        self.progress.grid(row=0, column=3, sticky="ew")
         self.progress.stop()
         self.progress.grid_remove()
 
@@ -136,6 +148,7 @@ class ResumeAnalyzerApp(ctk.CTk):
         self.ats_card.grid(row=0, column=0, padx=(0, 8), sticky="ew")
         self.match_card = ScoreCard(scores, "Job Match")
         self.match_card.grid(row=0, column=1, padx=(8, 0), sticky="ew")
+        self.match_card.set_score(None)
 
         self.results_frame = ctk.CTkScrollableFrame(content)
         self.results_frame.grid(row=2, column=0, sticky="nsew")
@@ -164,6 +177,8 @@ class ResumeAnalyzerApp(ctk.CTk):
         resume_path = self.selected_file
         job_description = self.job_textbox.get("1.0", "end").strip()
         use_gemini = bool(self.use_gemini_var.get()) and bool(GEMINI_API_KEY)
+        self.current_analysis = None
+        self.current_file_name = ""
         self._set_busy(True)
         thread = threading.Thread(
             target=self._run_analysis,
@@ -190,7 +205,6 @@ class ResumeAnalyzerApp(ctk.CTk):
         self.current_file_name = file_name
         self.current_analysis = analysis
         self._set_busy(False)
-        self.export_button.configure(state="normal")
         self._render_analysis(analysis)
         self._load_history()
 
@@ -202,6 +216,7 @@ class ResumeAnalyzerApp(ctk.CTk):
         if busy:
             self.analyze_button.configure(state="disabled")
             self.export_button.configure(state="disabled")
+            self.json_button.configure(state="disabled")
             self.gemini_checkbox.configure(state="disabled")
             self.progress.grid()
             self.progress.start()
@@ -211,27 +226,43 @@ class ResumeAnalyzerApp(ctk.CTk):
                 self.gemini_checkbox.configure(state="normal")
             self.progress.stop()
             self.progress.grid_remove()
-            if self.current_analysis:
-                self.export_button.configure(state="normal")
+            download_state = "normal" if self.current_analysis else "disabled"
+            self.export_button.configure(state=download_state)
+            self.json_button.configure(state=download_state)
 
     def _render_analysis(self, analysis: dict[str, Any]) -> None:
         self._clear_results()
         self.ats_card.set_score(int(analysis.get("ats_score", 0)))
-        self.match_card.set_score(int(analysis.get("match_percentage", 0)))
+        self.match_card.set_score(
+            analysis.get("match_percentage"), analysis.get("match_method", "")
+        )
+
+        SummaryCard(self.results_frame, "Analysis Mode", analysis.get("analysis_mode", "Local analysis")).grid(
+            row=0, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+        )
 
         SummaryCard(self.results_frame, "Resume Summary", analysis.get("summary", "")).grid(
-            row=0, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+            row=1, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
         )
 
         breakdown = analysis.get("ats_breakdown", {})
         BreakdownCard(self.results_frame, "ATS Readiness Breakdown", breakdown).grid(
-            row=1, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+            row=2, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
         )
 
         if analysis.get("match_explanation"):
             SummaryCard(self.results_frame, "Job Match Method", analysis["match_explanation"]).grid(
-                row=2, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+                row=3, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
             )
+
+        match_available = analysis.get(
+            "match_available", analysis.get("match_percentage") is not None
+        )
+        missing_keywords = analysis.get("missing_keywords", [])
+        missing_job_skills = analysis.get("missing_job_skills", [])
+        if not match_available:
+            missing_keywords = ["Add a job description to compare keywords."]
+            missing_job_skills = ["Add a job description to compare required skills."]
 
         cards = [
             ("Technical Skills", analysis.get("technical_skills", [])),
@@ -240,16 +271,20 @@ class ResumeAnalyzerApp(ctk.CTk):
             ("Strengths", analysis.get("strengths", [])),
             ("Weaknesses", analysis.get("weaknesses", [])),
             ("Grammar Suggestions", analysis.get("grammar_suggestions", [])),
-            ("Recommendations", analysis.get("recommendations", [])),
-            ("Missing Keywords", analysis.get("missing_keywords", [])),
-            ("Missing Job Skills", analysis.get("missing_job_skills", [])),
+            ("Missing Keywords", missing_keywords),
+            ("Missing Job Skills", missing_job_skills),
         ]
 
-        start_row = 3 if analysis.get("match_explanation") else 2
+        start_row = 4 if analysis.get("match_explanation") else 3
         for position, (title, items) in enumerate(cards):
             row = start_row + position // 2
             column = position % 2
             ListCard(self.results_frame, title, items).grid(row=row, column=column, padx=6, pady=6, sticky="nsew")
+
+        recommendations_row = start_row + (len(cards) + 1) // 2
+        RecommendationsCard(self.results_frame, analysis.get("recommendations", [])).grid(
+            row=recommendations_row, column=0, columnspan=2, padx=6, pady=6, sticky="ew"
+        )
 
     def _show_empty_state(self) -> None:
         self._clear_results()
@@ -265,23 +300,64 @@ class ResumeAnalyzerApp(ctk.CTk):
         for child in self.results_frame.winfo_children():
             child.destroy()
 
+    def _suggested_download_name(self, extension: str) -> str:
+        resume_stem = Path(self.current_file_name).stem or "Resume"
+        return f"{resume_stem}_AI_Resume_Analysis{extension}"
+
     def _export_report(self) -> None:
         if not self.current_analysis:
             messagebox.showwarning("No analysis", "Analyze a resume before exporting.")
             return
+        destination = filedialog.asksaveasfilename(
+            title="Download PDF Report",
+            defaultextension=".pdf",
+            initialfile=self._suggested_download_name(".pdf"),
+            filetypes=[("PDF documents", "*.pdf")],
+            confirmoverwrite=True,
+        )
+        if not destination:
+            return
         try:
-            output_path = export_analysis_pdf(self.current_file_name, self.current_analysis)
+            output_path = export_analysis_pdf(
+                self.current_file_name, self.current_analysis, Path(destination)
+            )
             messagebox.showinfo("Report exported", f"Saved report to:\n{output_path}")
         except Exception:
             logger.exception("Report export failed")
             messagebox.showerror("Export failed", "Could not export the PDF report.")
 
+    def _export_json(self) -> None:
+        if not self.current_analysis:
+            messagebox.showwarning("No analysis", "Analyze a resume before exporting.")
+            return
+        destination = filedialog.asksaveasfilename(
+            title="Download JSON Results",
+            defaultextension=".json",
+            initialfile=self._suggested_download_name(".json"),
+            filetypes=[("JSON files", "*.json")],
+            confirmoverwrite=True,
+        )
+        if not destination:
+            return
+        try:
+            payload = dict(self.current_analysis)
+            payload["resume_file"] = self.current_file_name
+            Path(destination).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            messagebox.showinfo("Results downloaded", f"Saved JSON results to:\n{destination}")
+        except Exception:
+            logger.exception("JSON export failed")
+            messagebox.showerror("Export failed", "Could not save the JSON results.")
+
     def _load_history(self) -> None:
         history = list_recent_analyses()
-        lines = [
-            f"#{item['id']}  {item['file_name']}\nATS: {item['ats_score']} | Match: {item['match_percentage']}%\n"
-            for item in history
-        ]
+        lines = []
+        for item in history:
+            match = "—" if item.get("match_percentage") is None else f"{item['match_percentage']}%"
+            lines.append(
+                f"#{item['id']}  {item['file_name']}\nATS: {item['ats_score']} | Match: {match}\n"
+            )
         self.history_box.configure(state="normal")
         self.history_box.delete("1.0", "end")
         self.history_box.insert("1.0", "\n".join(lines) if lines else "No saved analyses yet.")
@@ -383,17 +459,33 @@ class ScoreCard(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"))
         self.title_label.grid(row=0, column=0, padx=18, pady=(16, 4), sticky="w")
 
-        self.score_label = ctk.CTkLabel(self, text="0", font=ctk.CTkFont(size=36, weight="bold"))
+        self.score_font = ctk.CTkFont(size=36, weight="bold")
+        self.empty_score_font = ctk.CTkFont(size=30, weight="bold")
+        self.score_label = ctk.CTkLabel(self, text="0", font=self.score_font)
         self.score_label.grid(row=1, column=0, padx=18, pady=(0, 8), sticky="w")
 
+        self.detail_label = ctk.CTkLabel(
+            self, text="", text_color="#94A3B8", font=ctk.CTkFont(size=12), wraplength=340, justify="left"
+        )
+        self.detail_label.grid(row=2, column=0, padx=18, pady=(0, 8), sticky="w")
+
         self.progress = ctk.CTkProgressBar(self)
-        self.progress.grid(row=2, column=0, padx=18, pady=(0, 18), sticky="ew")
+        self.progress.grid(row=3, column=0, padx=18, pady=(0, 18), sticky="ew")
         self.grid_columnconfigure(0, weight=1)
         self.set_score(0)
 
-    def set_score(self, score: int) -> None:
+    def set_score(self, score: int | None, detail: str = "") -> None:
+        if score is None:
+            self.score_label.configure(text="— / 100", font=self.empty_score_font)
+            self.detail_label.configure(
+                text="No job description provided. Add one to calculate match."
+            )
+            self.progress.set(0)
+            return
+
         score = max(0, min(100, score))
-        self.score_label.configure(text=f"{score}/100")
+        self.score_label.configure(text=f"{score}/100", font=self.score_font)
+        self.detail_label.configure(text=detail)
         self.progress.set(score / 100)
 
 
@@ -444,4 +536,21 @@ class ListCard(ctk.CTkFrame):
         body = "\n".join(f"- {item}" for item in items) if items else "No items available."
         ctk.CTkLabel(self, text=body, wraplength=390, justify="left").grid(
             row=1, column=0, padx=14, pady=(0, 14), sticky="nw"
+        )
+
+
+class RecommendationsCard(ctk.CTkFrame):
+    def __init__(self, parent: ctk.CTkBaseClass, recommendations: list[str]) -> None:
+        super().__init__(parent)
+        self.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self,
+            text="RECOMMENDATIONS",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="#93C5FD",
+        ).grid(row=0, column=0, padx=16, pady=(14, 8), sticky="w")
+        items = recommendations or ["Tailor quantified achievements and relevant skills to each target role."]
+        body = "\n\n".join(f"{position}. {item}" for position, item in enumerate(items, start=1))
+        ctk.CTkLabel(self, text=body, wraplength=760, justify="left").grid(
+            row=1, column=0, padx=16, pady=(0, 14), sticky="nw"
         )

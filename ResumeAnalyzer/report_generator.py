@@ -13,11 +13,16 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from config import REPORTS_DIR
 
 
-def export_analysis_pdf(file_name: str, analysis: dict[str, Any]) -> Path:
-    REPORTS_DIR.mkdir(exist_ok=True)
+def export_analysis_pdf(
+    file_name: str, analysis: dict[str, Any], output_path: str | Path | None = None
+) -> Path:
     generated_at = datetime.now()
-    timestamp = generated_at.strftime("%Y%m%d_%H%M%S")
-    output_path = REPORTS_DIR / f"analysis_{timestamp}.pdf"
+    if output_path is None:
+        REPORTS_DIR.mkdir(exist_ok=True)
+        timestamp = generated_at.strftime("%Y%m%d_%H%M%S")
+        output_path = REPORTS_DIR / f"analysis_{timestamp}.pdf"
+    else:
+        output_path = Path(output_path)
 
     document = SimpleDocTemplate(
         str(output_path),
@@ -28,11 +33,16 @@ def export_analysis_pdf(file_name: str, analysis: dict[str, Any]) -> Path:
         bottomMargin=0.6 * inch,
     )
     styles = getSampleStyleSheet()
+    match_available = _match_available(analysis)
     story: list[Any] = [
         Paragraph("AI Resume Analysis Report", styles["Title"]),
         Paragraph("Project Name: AI Resume Analyzer", styles["Normal"]),
         Paragraph(f"Resume: {file_name}", styles["Normal"]),
         Paragraph(f"Date: {generated_at.strftime('%d %B %Y, %I:%M %p')}", styles["Normal"]),
+        Paragraph(
+            f"Analysis Mode: {_safe_text(analysis.get('analysis_mode', 'Local analysis'))}",
+            styles["Normal"],
+        ),
         Spacer(1, 12),
         _score_table(analysis),
         Spacer(1, 8),
@@ -58,12 +68,22 @@ def export_analysis_pdf(file_name: str, analysis: dict[str, Any]) -> Path:
             ]
         )
 
-    if analysis.get("match_explanation"):
+    if match_available:
         story.extend(
             [
                 Spacer(1, 10),
                 Paragraph("Job Match Method", styles["Heading2"]),
+                Paragraph(_safe_text(analysis.get("match_method", "")), styles["BodyText"]),
                 Paragraph(_safe_text(analysis.get("match_explanation", "")), styles["BodyText"]),
+            ]
+        )
+    else:
+        story.extend(
+            [
+                Spacer(1, 10),
+                Paragraph("Job Match Method", styles["Heading2"]),
+                Paragraph("Not calculated", styles["BodyText"]),
+                Paragraph("Reason: No job description provided.", styles["BodyText"]),
             ]
         )
 
@@ -78,19 +98,24 @@ def export_analysis_pdf(file_name: str, analysis: dict[str, Any]) -> Path:
         ("Missing Keywords", "missing_keywords"),
         ("Missing Job Skills", "missing_job_skills"),
     ]:
+        items = analysis.get(key, [])
+        if not match_available and key in {"missing_keywords", "missing_job_skills"}:
+            items = ["Not assessed without a job description."]
         story.extend([Spacer(1, 10), Paragraph(title, styles["Heading2"])])
-        story.extend(_bullets(analysis.get(key, []), styles["BodyText"]))
+        story.extend(_bullets(items, styles["BodyText"]))
 
     document.build(story)
     return output_path
 
 
 def _score_table(analysis: dict[str, Any]) -> Table:
+    match_score = analysis.get("match_percentage")
+    match_display = f"{match_score}/100" if _match_available(analysis) else "Not calculated"
     table = Table(
         [
             ["Metric", "Score"],
             ["ATS Readiness", f"{analysis.get('ats_score', 0)} / 100"],
-            ["Job Match", f"{analysis.get('match_percentage', 0)}%"],
+            ["Job Match", match_display],
         ],
         colWidths=[3 * inch, 2.5 * inch],
     )
@@ -105,6 +130,12 @@ def _score_table(analysis: dict[str, Any]) -> Table:
         )
     )
     return table
+
+
+def _match_available(analysis: dict[str, Any]) -> bool:
+    return analysis.get("match_percentage") is not None and bool(
+        analysis.get("match_available", True)
+    )
 
 
 def _breakdown_table(breakdown: dict[str, Any]) -> Table:

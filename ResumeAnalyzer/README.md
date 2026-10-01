@@ -7,12 +7,13 @@ AI Resume Analyzer is a standalone Windows desktop application built with Python
 - Choose a PDF or DOCX resume with a file picker
 - Extract resume text with PyMuPDF
 - Extract Word resume text with python-docx
-- Analyze with Gemini when `GEMINI_API_KEY` is configured
-- Fall back to a keyword-based analyzer when Gemini is unavailable
-- Display summary, ATS score, skills, strengths, weaknesses, grammar suggestions, recommendations, and job match data
+- Use Gemini by default when `GEMINI_API_KEY` is configured, with an option to turn it off
+- Use local ATS, skills, and job-match analysis when Gemini is disabled or unavailable
+- Show resume-specific recommendations, skills, strengths, weaknesses, grammar suggestions, and job-match data
 - Paste an optional job description
-- Save analyses in SQLite
-- Export the current analysis as a PDF report
+- Calculate Job Match only when a target job description is provided; without one, display an unavailable state rather than a zero score
+- Save analysis results in SQLite without storing raw resume or job-description text
+- Download the current analysis as a PDF report or formatted JSON file
 - Build a portable Windows one-dir application with PyInstaller
 
 ## Project Structure
@@ -47,7 +48,7 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-Edit `.env` and add your Gemini API key:
+Edit `.env` and add your Gemini API key. Gemini is enabled by default when a key is configured, and can be turned off in the application:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -110,7 +111,7 @@ The portable folder includes `.env.example`. To use Gemini:
    GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Without a Gemini key, the application still works with the fallback keyword-based analyzer.
+When Gemini is enabled, extracted resume and job-description text is sent to the configured Google Gemini API. Turning Gemini off keeps that text local. Without a key, Gemini is disabled and the local analyzer continues to work.
 
 ## Required Portable Contents
 
@@ -128,6 +129,7 @@ ResumeAnalyzer_Portable/
 ## Notes
 
 - If Gemini is unavailable or the API key is missing, the app still works using the fallback analyzer.
-- Reports are saved to the `reports` folder.
+- PDF and JSON downloads open a Save As dialog and suggest a filename based on the resume.
+- Recommendations are shown in the application and included in PDF reports.
 - Runtime logs are saved to `app.log`.
 - For a custom executable icon, place a valid `app_icon.ico` file inside `assets/` before running `build.bat`.

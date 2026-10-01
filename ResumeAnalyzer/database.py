@@ -86,12 +86,20 @@ def list_recent_analyses(limit: int = 10) -> list[dict[str, Any]]:
     history: list[dict[str, Any]] = []
     for row in rows:
         analysis = json.loads(row["analysis_json"])
+        match_percentage = analysis.get("match_percentage")
+        if (
+            "match_available" not in analysis
+            and "match_status" not in analysis
+            and match_percentage == 0
+            and not str(analysis.get("match_explanation", "")).strip()
+        ):
+            match_percentage = None
         history.append(
             {
                 "id": row["id"],
                 "file_name": row["file_name"],
                 "ats_score": analysis.get("ats_score", 0),
-                "match_percentage": analysis.get("match_percentage", 0),
+                "match_percentage": match_percentage,
                 "created_at": row["created_at"],
             }
         )
