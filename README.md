@@ -24,44 +24,8 @@ An AI-assisted desktop application for resume analysis, ATS-oriented readiness s
 
 ## Architecture 
  
-```text 
-PDF / DOCX Resume 
-        | 
-        v 
-File Validation 
-        | 
-        v 
-Text Extraction 
-  |             | 
-PDF           DOCX 
- |              | 
- +---- OCR -----+ 
-        | 
-        v 
-Resume Text + Optional Job Description 
-        | 
-        +----------------------+ 
-        |                      | 
-   Gemini enabled?          Local mode 
-        |                      | 
-        v                      v 
-Gemini qualitative       Local analyzer 
-feedback + contextual    + TF-IDF matching 
-job matching            + skill coverage 
-        |                      | 
-        +----------+-----------+ 
-                   | 
-                   v 
-         Deterministic ATS Rubric 
-                   | 
-             +-----+-----+ 
-             |           | 
-             v           v 
-        GUI Dashboard  SQLite History 
-             | 
-             v 
-         PDF Report 
-``` 
+<img width="1024" height="572" alt="b13d2594-f090-4497-9639-4f8502158689" src="https://github.com/user-attachments/assets/ddabee26-ae3b-4416-84ff-587df3c59402" />
+
  
 ## ATS Readiness 
  
