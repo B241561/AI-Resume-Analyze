@@ -19,8 +19,7 @@ An AI-assisted desktop application for resume analysis, ATS-oriented readiness s
 - A4 PDF report export 
 - Native packaging through PyInstaller with a cross-platform Python build script## 📸 Application Preview
 
-<!-- Add your application screenshots to `docs/images/` -->
-<img width="1917" height="1030" alt="image" src="https://github.com/user-attachments/assets/4c1d9980-6d8e-4766-9502-00340b1304f0" />
+
 
 ## Workflow
 
