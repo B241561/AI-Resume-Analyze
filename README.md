@@ -22,7 +22,12 @@ An AI-assisted desktop application for resume analysis, ATS-oriented readiness s
 <!-- Add your application screenshots to `docs/images/` -->
 <img width="1917" height="1030" alt="image" src="https://github.com/user-attachments/assets/4c1d9980-6d8e-4766-9502-00340b1304f0" />
 ## Workflow
-<https://youtu.be/mbyUxWVvyhA />
+
+Watch the full walkthrough (unlisted video):
+
+[![AI Resume Analyzer Workflow](https://img.youtube.com/vi/mbyUxWVvyhA/maxresdefault.jpg)](https://youtu.be/mbyUxWVvyhA)
+
+> Click the thumbnail to watch on YouTube.
 
 ## Architecture 
  
